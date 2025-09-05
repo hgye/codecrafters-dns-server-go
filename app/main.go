@@ -39,8 +39,15 @@ func main() {
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
-		// Create an empty response
-		response := []byte{}
+		// Create a DNS response header
+		header := MessageHeader{
+			Id: 1234, // Example ID, should match request in real server
+		}
+
+		// Set QR to 1 (response)
+		header.SetQR(1)
+		// Set other fields as needed, e.g. Opcode, AA, etc.
+		response, _ := header.MarshalBinary()
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
