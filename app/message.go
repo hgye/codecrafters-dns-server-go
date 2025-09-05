@@ -10,7 +10,7 @@ import (
 type Message struct {
 	Header    MessageHeader
 	Questions []Question
-	// Answers    []ResourceRecord
+	Answers   []ResourceRecord
 	// Authority  []ResourceRecord
 	// Additional []ResourceRecord
 }
@@ -147,6 +147,54 @@ func (q *Question) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	err = binary.Write(buf, binary.BigEndian, q.Class)
+	if err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+type ResourceRecord struct {
+	Name     string
+	Type     uint16
+	Class    uint16
+	TTL      uint32
+	RDLength uint16
+	RData    []byte
+}
+
+func (rr *ResourceRecord) MarshalBinary() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	// Encode rr.Name as DNS label format
+	labels := bytes.Split([]byte(rr.Name), []byte("."))
+	for _, label := range labels {
+		if len(label) > 63 {
+			return nil, fmt.Errorf("label too long: %s", label)
+		}
+		buf.WriteByte(byte(len(label)))
+		buf.Write(label)
+	}
+	buf.WriteByte(0) // End of name
+
+	// Write Type, Class, TTL, RDLength, and RData
+	err := binary.Write(buf, binary.BigEndian, rr.Type)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, rr.Class)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, rr.TTL)
+	if err != nil {
+		return nil, err
+	}
+	rr.RDLength = uint16(len(rr.RData))
+	err = binary.Write(buf, binary.BigEndian, rr.RDLength)
+	if err != nil {
+		return nil, err
+	}
+	_, err = buf.Write(rr.RData)
 	if err != nil {
 		return nil, err
 	}

@@ -47,6 +47,7 @@ func main() {
 		// Set QR to 1 (response)
 		header.SetQR(1)
 		header.QDCount = 1
+		header.ANCount = 1
 		// Set other fields as needed, e.g. Opcode, AA, etc.
 		response, _ := header.MarshalBinary()
 
@@ -57,6 +58,23 @@ func main() {
 		}
 		qData, _ := q.MarshalBinary()
 		response = append(response, qData...)
+
+		answer := ResourceRecord{
+			Name:     "codecrafters.io",
+			Type:     1, // A record
+			Class:    1, // IN class
+			TTL:      60,
+			RDLength: 4,
+			RData:    []byte{127, 0, 0, 1}, // Example IP address
+		}
+
+		aData, _ := answer.MarshalBinary()
+		response = append(response, aData...)
+
+		// fmt.Printf("qData: (length %d)%v\n", len(qData), qData)
+		// fmt.Printf("aData: (length %d)%v\n", len(aData), aData)
+
+		// fmt.Printf("Sending response to %s: (length %d)%v\n", source, len(response), response)
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
