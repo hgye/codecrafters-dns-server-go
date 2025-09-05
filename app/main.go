@@ -46,8 +46,17 @@ func main() {
 
 		// Set QR to 1 (response)
 		header.SetQR(1)
+		header.QDCount = 1
 		// Set other fields as needed, e.g. Opcode, AA, etc.
 		response, _ := header.MarshalBinary()
+
+		q := Question{
+			Name:  "codecrafters.io",
+			Type:  1, // A record
+			Class: 1, // IN class
+		}
+		qData, _ := q.MarshalBinary()
+		response = append(response, qData...)
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {

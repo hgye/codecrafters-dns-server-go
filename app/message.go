@@ -1,6 +1,19 @@
 package main
 
-type Message struct{}
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+)
+
+// header, question, answer, authority, and an additional space.
+type Message struct {
+	Header    MessageHeader
+	Questions []Question
+	// Answers    []ResourceRecord
+	// Authority  []ResourceRecord
+	// Additional []ResourceRecord
+}
 
 type MessageHeader struct {
 	// DNS Message Header Format
@@ -102,4 +115,41 @@ func (h *MessageHeader) MarshalBinary() ([]byte, error) {
 	b[10] = byte(h.ARCount >> 8)
 	b[11] = byte(h.ARCount)
 	return b, nil
+}
+
+type Question struct {
+	Name  string
+	Type  uint16
+	Class uint16
+}
+
+type BinaryMarshaler interface {
+	MarshalBinary() (data []byte, err error)
+}
+
+func (q *Question) MarshalBinary() ([]byte, error) {
+	// Implement DNS question serialization here
+	buf := new(bytes.Buffer)
+	// Encode q.Name as DNS label format (e.g., "www.example.com" -> 3www7example3com0)
+	labels := bytes.Split([]byte(q.Name), []byte("."))
+	for _, label := range labels {
+		if len(label) > 63 {
+			return nil, fmt.Errorf("label too long: %s", label)
+		}
+		buf.WriteByte(byte(len(label)))
+		buf.Write(label)
+	}
+	buf.WriteByte(0) // End of name
+
+	// write Type and Class
+	err := binary.Write(buf, binary.BigEndian, q.Type)
+	if err != nil {
+		return nil, err
+	}
+	err = binary.Write(buf, binary.BigEndian, q.Class)
+	if err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }
