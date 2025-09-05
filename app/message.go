@@ -117,6 +117,19 @@ func (h *MessageHeader) MarshalBinary() ([]byte, error) {
 	return b, nil
 }
 
+func (h *MessageHeader) UnmarshalBinary(data []byte) error {
+	if len(data) < 12 {
+		return fmt.Errorf("data too short to unmarshal MessageHeader")
+	}
+	h.Id = binary.BigEndian.Uint16(data[0:2])
+	h.Flags = binary.BigEndian.Uint16(data[2:4])
+	h.QDCount = binary.BigEndian.Uint16(data[4:6])
+	h.ANCount = binary.BigEndian.Uint16(data[6:8])
+	h.NSCount = binary.BigEndian.Uint16(data[8:10])
+	h.ANCount = binary.BigEndian.Uint16(data[10:12])
+	return nil
+}
+
 type Question struct {
 	Name  string
 	Type  uint16

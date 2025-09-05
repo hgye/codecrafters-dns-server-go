@@ -39,15 +39,36 @@ func main() {
 		receivedData := string(buf[:size])
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
+		var reqHeader MessageHeader
+
+		err = reqHeader.UnmarshalBinary([]byte(receivedData))
+		if err != nil {
+			fmt.Println("Failed to unmarshal request header:", err)
+			continue
+		}
+
+		fmt.Printf("Request Header: %+v\n", reqHeader)
+
 		// Create a DNS response header
 		header := MessageHeader{
-			Id: 1234, // Example ID, should match request in real server
+			Id:      reqHeader.Id, // from request
+			QDCount: reqHeader.QDCount,
+			ANCount: 1, // hardcoded for now
+			NSCount: reqHeader.NSCount,
+			ARCount: reqHeader.ARCount,
 		}
 
 		// Set QR to 1 (response)
 		header.SetQR(1)
-		header.QDCount = 1
-		header.ANCount = 1
+		header.SetOpcode(reqHeader.GetOpcode())
+		header.SetRD(reqHeader.GetRD())
+
+		if reqHeader.GetOpcode() == 0 { // No error
+			header.SetRcode(0) // No error
+		} else {
+			header.SetRcode(4) // Not Implemented
+		}
+
 		// Set other fields as needed, e.g. Opcode, AA, etc.
 		response, _ := header.MarshalBinary()
 
