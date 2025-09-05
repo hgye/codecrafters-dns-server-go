@@ -49,11 +49,21 @@ func main() {
 
 		fmt.Printf("Request Header: %+v\n", reqHeader)
 
+		var reQuestion Question
+
+		err = reQuestion.UnmarshalBinary([]byte(receivedData[12:])) // Skip header (12 bytes)
+		if err != nil {
+			fmt.Println("Failed to unmarshal request question:", err)
+			continue
+		}
+
+		fmt.Printf("Request Question: %+v\n", reQuestion)
+
 		// Create a DNS response header
 		header := MessageHeader{
 			Id:      reqHeader.Id, // from request
 			QDCount: reqHeader.QDCount,
-			ANCount: 1, // hardcoded for now
+			ANCount: 1, // hardcoded for now, should be number of answers, not from request
 			NSCount: reqHeader.NSCount,
 			ARCount: reqHeader.ARCount,
 		}
@@ -73,7 +83,7 @@ func main() {
 		response, _ := header.MarshalBinary()
 
 		q := Question{
-			Name:  "codecrafters.io",
+			Name:  reQuestion.Name,
 			Type:  1, // A record
 			Class: 1, // IN class
 		}
@@ -81,7 +91,7 @@ func main() {
 		response = append(response, qData...)
 
 		answer := ResourceRecord{
-			Name:     "codecrafters.io",
+			Name:     reQuestion.Name,
 			Type:     1, // A record
 			Class:    1, // IN class
 			TTL:      60,

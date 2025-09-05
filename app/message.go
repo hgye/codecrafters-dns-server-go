@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // header, question, answer, authority, and an additional space.
@@ -15,6 +16,9 @@ type Message struct {
 	// Additional []ResourceRecord
 }
 
+type BinaryMarshaler interface {
+	MarshalBinary() (data []byte, err error)
+}
 type MessageHeader struct {
 	// DNS Message Header Format
 	//
@@ -136,10 +140,6 @@ type Question struct {
 	Class uint16
 }
 
-type BinaryMarshaler interface {
-	MarshalBinary() (data []byte, err error)
-}
-
 func (q *Question) MarshalBinary() ([]byte, error) {
 	// Implement DNS question serialization here
 	buf := new(bytes.Buffer)
@@ -165,6 +165,36 @@ func (q *Question) MarshalBinary() ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func (q *Question) UnmarshalBinary(data []byte) error {
+	// Implement DNS question deserialization here
+	// read Name in DNS label format
+	var nameParts []string
+	i := 0
+	for {
+		if i >= len(data) {
+			return fmt.Errorf("data too short while reading question name")
+		}
+		length := int(data[i])
+		if length == 0 {
+			i++
+			break
+		}
+		if i+length >= len(data) {
+			return fmt.Errorf("data too short while reading question name")
+		}
+		nameParts = append(nameParts, string(data[i+1:i+1+length]))
+		i += length + 1
+	}
+	q.Name = strings.Join(nameParts, ".")
+
+	if i+4 > len(data) {
+		return fmt.Errorf("data too short to read Type and Class")
+	}
+	q.Type = binary.BigEndian.Uint16(data[i : i+2])
+	q.Class = binary.BigEndian.Uint16(data[i+2 : i+4])
+	return nil
 }
 
 type ResourceRecord struct {
