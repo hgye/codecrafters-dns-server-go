@@ -5,6 +5,83 @@ import (
 	"net"
 )
 
+// handleDNSRequest processes a single DNS request and returns the response
+func handleDNSRequest(requestData []byte) ([]byte, error) {
+	var reqHeader MessageHeader
+	
+	err := reqHeader.UnmarshalBinary(requestData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal request header: %w", err)
+	}
+	
+	fmt.Printf("Request Header: %+v\n", reqHeader)
+	
+	var reqQuestion Question
+	err = reqQuestion.UnmarshalBinary(requestData[DNSHeaderSize:])
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal request question: %w", err)
+	}
+	
+	fmt.Printf("Request Question: %+v\n", reqQuestion)
+	
+	// Create response header
+	responseHeader := MessageHeader{
+		Id:      reqHeader.Id,
+		QDCount: reqHeader.QDCount,
+		ANCount: 1, // One answer record
+		NSCount: reqHeader.NSCount,
+		ARCount: reqHeader.ARCount,
+	}
+	
+	// Set response flags
+	responseHeader.SetQR(1) // Response
+	responseHeader.SetOpcode(reqHeader.GetOpcode())
+	responseHeader.SetRD(reqHeader.GetRD())
+	
+	if reqHeader.GetOpcode() == 0 {
+		responseHeader.SetRcode(RCodeNoError)
+	} else {
+		responseHeader.SetRcode(RCodeNotImpl)
+	}
+	
+	// Marshal response header
+	response, err := responseHeader.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal response header: %w", err)
+	}
+	
+	// Add question section to response
+	question := Question{
+		Name:  reqQuestion.Name,
+		Type:  RecordTypeA,
+		Class: ClassIN,
+	}
+	
+	qData, err := question.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal question: %w", err)
+	}
+	response = append(response, qData...)
+	
+	// Add answer section
+	answer := ResourceRecord{
+		Name:     reqQuestion.Name,
+		Type:     RecordTypeA,
+		Class:    ClassIN,
+		TTL:      60,
+		RDLength: 4,
+		RData:    []byte{127, 0, 0, 1}, // localhost
+	}
+	
+	aData, err := answer.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal answer: %w", err)
+	}
+	response = append(response, aData...)
+	
+	return response, nil
+}
+
 // Ensures gofmt doesn't remove the "net" import in stage 1 (feel free to remove this!)
 var _ = net.ListenUDP
 
@@ -27,7 +104,7 @@ func main() {
 	}
 	defer udpConn.Close()
 
-	buf := make([]byte, 512)
+	buf := make([]byte, MaxDNSPacketSize)
 
 	for {
 		size, source, err := udpConn.ReadFromUDP(buf)
@@ -36,77 +113,23 @@ func main() {
 			break
 		}
 
-		receivedData := string(buf[:size])
-		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
-
-		var reqHeader MessageHeader
-
-		err = reqHeader.UnmarshalBinary([]byte(receivedData))
-		if err != nil {
-			fmt.Println("Failed to unmarshal request header:", err)
+		receivedData := buf[:size]
+		fmt.Printf("Received %d bytes from %s\n", size, source)
+		
+		// Basic validation: DNS messages must be at least header size
+		if size < DNSHeaderSize {
+			fmt.Printf("Packet too small: %d bytes (minimum %d required)\n", size, DNSHeaderSize)
 			continue
 		}
 
-		fmt.Printf("Request Header: %+v\n", reqHeader)
-
-		var reQuestion Question
-
-		err = reQuestion.UnmarshalBinary([]byte(receivedData[12:])) // Skip header (12 bytes)
+		// Process the DNS request
+		response, err := handleDNSRequest(receivedData)
 		if err != nil {
-			fmt.Println("Failed to unmarshal request question:", err)
+			fmt.Printf("Failed to handle DNS request: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("Request Question: %+v\n", reQuestion)
-
-		// Create a DNS response header
-		header := MessageHeader{
-			Id:      reqHeader.Id, // from request
-			QDCount: reqHeader.QDCount,
-			ANCount: 1, // hardcoded for now, should be number of answers, not from request
-			NSCount: reqHeader.NSCount,
-			ARCount: reqHeader.ARCount,
-		}
-
-		// Set QR to 1 (response)
-		header.SetQR(1)
-		header.SetOpcode(reqHeader.GetOpcode())
-		header.SetRD(reqHeader.GetRD())
-
-		if reqHeader.GetOpcode() == 0 { // No error
-			header.SetRcode(0) // No error
-		} else {
-			header.SetRcode(4) // Not Implemented
-		}
-
-		// Set other fields as needed, e.g. Opcode, AA, etc.
-		response, _ := header.MarshalBinary()
-
-		q := Question{
-			Name:  reQuestion.Name,
-			Type:  1, // A record
-			Class: 1, // IN class
-		}
-		qData, _ := q.MarshalBinary()
-		response = append(response, qData...)
-
-		answer := ResourceRecord{
-			Name:     reQuestion.Name,
-			Type:     1, // A record
-			Class:    1, // IN class
-			TTL:      60,
-			RDLength: 4,
-			RData:    []byte{127, 0, 0, 1}, // Example IP address
-		}
-
-		aData, _ := answer.MarshalBinary()
-		response = append(response, aData...)
-
-		// fmt.Printf("qData: (length %d)%v\n", len(qData), qData)
-		// fmt.Printf("aData: (length %d)%v\n", len(aData), aData)
-
-		// fmt.Printf("Sending response to %s: (length %d)%v\n", source, len(response), response)
-
+		// Send response back to client
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
 			fmt.Println("Failed to send response:", err)

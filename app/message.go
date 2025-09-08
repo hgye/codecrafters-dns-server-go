@@ -7,6 +7,97 @@ import (
 	"strings"
 )
 
+// DNS protocol constants
+const (
+	DNSHeaderSize     = 12
+	MaxDNSPacketSize  = 512
+	MaxLabelLength    = 63
+	MaxDomainLength   = 253
+	
+	// DNS record types
+	RecordTypeA     = 1
+	RecordTypeNS    = 2
+	RecordTypeCNAME = 5
+	
+	// DNS classes
+	ClassIN = 1
+	
+	// DNS response codes
+	RCodeNoError      = 0
+	RCodeFormatError  = 1
+	RCodeServerFail   = 2
+	RCodeNameError    = 3
+	RCodeNotImpl      = 4
+	RCodeRefused      = 5
+)
+
+// encodeDNSName encodes a domain name into DNS wire format
+func encodeDNSName(name string, buf *bytes.Buffer) error {
+	// Validate total domain name length
+	if len(name) > MaxDomainLength {
+		return fmt.Errorf("domain name too long: %d bytes (max %d)", len(name), MaxDomainLength)
+	}
+	
+	// Encode name as DNS label format (e.g., "www.example.com" -> 3www7example3com0)
+	labels := bytes.Split([]byte(name), []byte("."))
+	for _, label := range labels {
+		if len(label) > MaxLabelLength {
+			return fmt.Errorf("label too long: %s (max %d bytes)", label, MaxLabelLength)
+		}
+		if len(label) == 0 {
+			continue // Skip empty labels
+		}
+		buf.WriteByte(byte(len(label)))
+		buf.Write(label)
+	}
+	buf.WriteByte(0) // End of name marker
+	return nil
+}
+
+// decodeDNSName decodes a domain name from DNS wire format
+func decodeDNSName(data []byte, offset int) (string, int, error) {
+	if offset >= len(data) {
+		return "", 0, fmt.Errorf("offset %d exceeds data length %d", offset, len(data))
+	}
+	
+	var nameParts []string
+	i := offset
+	totalLength := 0
+	
+	for {
+		if i >= len(data) {
+			return "", 0, fmt.Errorf("data too short while reading DNS name at offset %d", offset)
+		}
+		
+		length := int(data[i])
+		if length == 0 {
+			i++
+			break
+		}
+		
+		// Validate length doesn't exceed max label length
+		if length > MaxLabelLength {
+			return "", 0, fmt.Errorf("label length %d exceeds maximum %d", length, MaxLabelLength)
+		}
+		
+		// Check bounds for label data
+		if i+1+length > len(data) {
+			return "", 0, fmt.Errorf("data too short while reading DNS name label at offset %d", i)
+		}
+		
+		nameParts = append(nameParts, string(data[i+1:i+1+length]))
+		totalLength += length + 1 // +1 for length byte
+		i += length + 1
+		
+		// Check total domain name length limit
+		if totalLength > MaxDomainLength {
+			return "", 0, fmt.Errorf("domain name too long: %d bytes (max %d)", totalLength, MaxDomainLength)
+		}
+	}
+	
+	return strings.Join(nameParts, "."), i, nil
+}
+
 // header, question, answer, authority, and an additional space.
 type Message struct {
 	Header    MessageHeader
@@ -105,7 +196,7 @@ func (h *MessageHeader) SetRcode(rcode uint8) {
 }
 
 func (h *MessageHeader) MarshalBinary() ([]byte, error) {
-	b := make([]byte, 12)
+	b := make([]byte, DNSHeaderSize)
 	b[0] = byte(h.Id >> 8)
 	b[1] = byte(h.Id)
 	b[2] = byte(h.Flags >> 8)
@@ -122,15 +213,15 @@ func (h *MessageHeader) MarshalBinary() ([]byte, error) {
 }
 
 func (h *MessageHeader) UnmarshalBinary(data []byte) error {
-	if len(data) < 12 {
-		return fmt.Errorf("data too short to unmarshal MessageHeader")
+	if len(data) < DNSHeaderSize {
+		return fmt.Errorf("data too short to unmarshal MessageHeader: got %d bytes, need %d", len(data), DNSHeaderSize)
 	}
 	h.Id = binary.BigEndian.Uint16(data[0:2])
 	h.Flags = binary.BigEndian.Uint16(data[2:4])
 	h.QDCount = binary.BigEndian.Uint16(data[4:6])
 	h.ANCount = binary.BigEndian.Uint16(data[6:8])
 	h.NSCount = binary.BigEndian.Uint16(data[8:10])
-	h.ANCount = binary.BigEndian.Uint16(data[10:12])
+	h.ARCount = binary.BigEndian.Uint16(data[10:12])
 	return nil
 }
 
@@ -141,18 +232,12 @@ type Question struct {
 }
 
 func (q *Question) MarshalBinary() ([]byte, error) {
-	// Implement DNS question serialization here
 	buf := new(bytes.Buffer)
-	// Encode q.Name as DNS label format (e.g., "www.example.com" -> 3www7example3com0)
-	labels := bytes.Split([]byte(q.Name), []byte("."))
-	for _, label := range labels {
-		if len(label) > 63 {
-			return nil, fmt.Errorf("label too long: %s", label)
-		}
-		buf.WriteByte(byte(len(label)))
-		buf.Write(label)
+	
+	// Encode DNS name
+	if err := encodeDNSName(q.Name, buf); err != nil {
+		return nil, fmt.Errorf("failed to encode DNS name: %w", err)
 	}
-	buf.WriteByte(0) // End of name
 
 	// write Type and Class
 	err := binary.Write(buf, binary.BigEndian, q.Type)
@@ -168,26 +253,13 @@ func (q *Question) MarshalBinary() ([]byte, error) {
 }
 
 func (q *Question) UnmarshalBinary(data []byte) error {
-	// Implement DNS question deserialization here
-	// read Name in DNS label format
-	var nameParts []string
-	i := 0
-	for {
-		if i >= len(data) {
-			return fmt.Errorf("data too short while reading question name")
-		}
-		length := int(data[i])
-		if length == 0 {
-			i++
-			break
-		}
-		if i+length >= len(data) {
-			return fmt.Errorf("data too short while reading question name")
-		}
-		nameParts = append(nameParts, string(data[i+1:i+1+length]))
-		i += length + 1
+	// Decode DNS name
+	name, bytesRead, err := decodeDNSName(data, 0)
+	if err != nil {
+		return fmt.Errorf("failed to decode DNS name: %w", err)
 	}
-	q.Name = strings.Join(nameParts, ".")
+	q.Name = name
+	i := bytesRead
 
 	if i+4 > len(data) {
 		return fmt.Errorf("data too short to read Type and Class")
@@ -208,16 +280,11 @@ type ResourceRecord struct {
 
 func (rr *ResourceRecord) MarshalBinary() ([]byte, error) {
 	buf := new(bytes.Buffer)
-	// Encode rr.Name as DNS label format
-	labels := bytes.Split([]byte(rr.Name), []byte("."))
-	for _, label := range labels {
-		if len(label) > 63 {
-			return nil, fmt.Errorf("label too long: %s", label)
-		}
-		buf.WriteByte(byte(len(label)))
-		buf.Write(label)
+	
+	// Encode DNS name
+	if err := encodeDNSName(rr.Name, buf); err != nil {
+		return nil, fmt.Errorf("failed to encode DNS name: %w", err)
 	}
-	buf.WriteByte(0) // End of name
 
 	// Write Type, Class, TTL, RDLength, and RData
 	err := binary.Write(buf, binary.BigEndian, rr.Type)
