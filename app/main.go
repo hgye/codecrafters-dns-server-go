@@ -7,6 +7,76 @@ import (
 
 // handleDNSRequest processes a single DNS request and returns the response
 func handleDNSRequest(requestData []byte) ([]byte, error) {
+	// Parse the full DNS message with compression support
+	var reqMsg Message
+	err := reqMsg.UnmarshalBinary(requestData)
+	if err != nil {
+		// Fallback to legacy method for compatibility
+		return handleDNSRequestLegacy(requestData)
+	}
+	
+	fmt.Printf("Request Header: %+v\n", reqMsg.Header)
+	fmt.Printf("Request Questions: %+v\n", reqMsg.Questions)
+	
+	// Validate we have at least one question
+	if len(reqMsg.Questions) == 0 {
+		return nil, fmt.Errorf("DNS message has no questions")
+	}
+	
+	// Create response message
+	responseMsg := Message{
+		Header: MessageHeader{
+			Id:      reqMsg.Header.Id,
+			QDCount: reqMsg.Header.QDCount,
+			ANCount: uint16(len(reqMsg.Questions)), // One answer per question
+			NSCount: 0,
+			ARCount: 0,
+		},
+		Questions: make([]Question, len(reqMsg.Questions)),
+		Answers:   make([]ResourceRecord, len(reqMsg.Questions)),
+	}
+	
+	// Set response flags
+	responseMsg.Header.SetQR(1) // Response
+	responseMsg.Header.SetOpcode(reqMsg.Header.GetOpcode())
+	responseMsg.Header.SetRD(reqMsg.Header.GetRD())
+	
+	if reqMsg.Header.GetOpcode() == 0 {
+		responseMsg.Header.SetRcode(RCodeNoError)
+	} else {
+		responseMsg.Header.SetRcode(RCodeNotImpl)
+	}
+	
+	// Copy questions and create answers
+	for i, q := range reqMsg.Questions {
+		// Copy question
+		responseMsg.Questions[i] = Question{
+			Name:  q.Name,
+			Type:  q.Type,
+			Class: q.Class,
+		}
+		
+		// Create answer (only handle A record queries for now)
+		responseMsg.Answers[i] = ResourceRecord{
+			Name:  q.Name,
+			Type:  RecordTypeA,
+			Class: ClassIN,
+			TTL:   60,
+			RData: []byte{127, 0, 0, 1}, // localhost
+		}
+	}
+	
+	// Marshal the complete response with compression
+	response, err := responseMsg.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal response message: %w", err)
+	}
+	
+	return response, nil
+}
+
+// handleDNSRequestLegacy processes a single DNS request using the legacy method (for compatibility)
+func handleDNSRequestLegacy(requestData []byte) ([]byte, error) {
 	var reqHeader MessageHeader
 	
 	err := reqHeader.UnmarshalBinary(requestData)
