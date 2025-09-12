@@ -7,33 +7,13 @@ import (
 	"strings"
 )
 
-// DNS protocol constants
+// DNS parsing internal constants (non-exported)
 const (
-	DNSHeaderSize     = 12
-	MaxDNSPacketSize  = 512
-	MaxLabelLength    = 63
-	MaxDomainLength   = 253
-	
-	// DNS compression constants
-	CompressionMask   = 0xC0 // 11000000 - identifies a compression pointer
-	CompressionOffset = 0x3FFF // 00111111 11111111 - mask for 14-bit offset
-	MaxCompressionJumps = 5 // Prevent infinite loops in compression
-	
-	// DNS record types
-	RecordTypeA     = 1
-	RecordTypeNS    = 2
-	RecordTypeCNAME = 5
-	
-	// DNS classes
-	ClassIN = 1
-	
-	// DNS response codes
-	RCodeNoError      = 0
-	RCodeFormatError  = 1
-	RCodeServerFail   = 2
-	RCodeNameError    = 3
-	RCodeNotImpl      = 4
-	RCodeRefused      = 5
+	MaxLabelLength      = 63
+	MaxDomainLength     = 253
+	CompressionMask     = 0xC0   // 11000000 - identifies a compression pointer
+	CompressionOffset   = 0x3FFF // 00111111 11111111 - mask for 14-bit offset
+	MaxCompressionJumps = 5      // Prevent infinite loops in compression
 )
 
 // CompressionMap tracks domain name positions for compression
@@ -41,55 +21,49 @@ type CompressionMap map[string]int
 
 // encodeDNSName encodes a domain name into DNS wire format
 func encodeDNSName(name string, buf *bytes.Buffer) error {
-	// For backward compatibility, call the compression-aware version with nil map
-	return encodeDNSNameWithCompression(name, buf, nil, 0)
+	// For backward compatibility, call the compression-aware version with a new map
+	return encodeDNSNameWithCompression(name, buf, make(CompressionMap))
 }
 
-// encodeDNSNameWithCompression encodes a domain name with optional compression
-func encodeDNSNameWithCompression(name string, buf *bytes.Buffer, compressionMap CompressionMap, msgStart int) error {
-	// Validate total domain name length
+// encodeDNSNameWithCompression encodes a domain name with optional compression.
+func encodeDNSNameWithCompression(name string, buf *bytes.Buffer, compressionMap CompressionMap) error {
 	if len(name) > MaxDomainLength {
 		return fmt.Errorf("domain name too long: %d bytes (max %d)", len(name), MaxDomainLength)
 	}
-	
-	// Split the name into labels
+
 	labels := strings.Split(name, ".")
-	
-	// Process each label
-	for i, label := range labels {
-		// Skip empty labels
-		if len(label) == 0 {
-			continue
-		}
-		
-		// Build the suffix from current position (e.g., "example.com" from "www.example.com")
+
+	for i := 0; i < len(labels); i++ {
 		suffix := strings.Join(labels[i:], ".")
-		
-		// Check if we can use compression for this suffix
-		if compressionMap != nil {
-			if offset, found := compressionMap[suffix]; found {
-				// Write compression pointer
-				pointer := CompressionMask<<8 | (offset & CompressionOffset)
-				binary.Write(buf, binary.BigEndian, uint16(pointer))
-				return nil // Done after writing pointer
-			}
-			
-			// Record this position for future compression
-			currentPos := msgStart + buf.Len()
-			compressionMap[suffix] = currentPos
+		if suffix == "" {
+			continue // Should not happen with well-formed domains, but good to guard.
 		}
-		
-		// Validate label length
+
+		if offset, found := compressionMap[suffix]; found {
+			// This suffix has been seen before. Write a pointer and we're done.
+			pointer := 0xC000 | (offset & 0x3FFF)
+			if err := binary.Write(buf, binary.BigEndian, uint16(pointer)); err != nil {
+				return fmt.Errorf("failed to write compression pointer for suffix %s: %w", suffix, err)
+			}
+			return nil
+		}
+
+		// This suffix is new. Record its current position before writing the next label.
+		// The position is relative to the start of the message (offset 0).
+		compressionMap[suffix] = buf.Len()
+
+		label := labels[i]
 		if len(label) > MaxLabelLength {
 			return fmt.Errorf("label too long: %s (max %d bytes)", label, MaxLabelLength)
 		}
-		
-		// Write label length and label data
-		buf.WriteByte(byte(len(label)))
-		buf.WriteString(label)
+
+		if len(label) > 0 {
+			buf.WriteByte(byte(len(label)))
+			buf.WriteString(label)
+		}
 	}
-	
-	// Write terminating zero
+
+	// Terminate the name with a zero-length label.
 	buf.WriteByte(0)
 	return nil
 }
@@ -105,85 +79,85 @@ func decodeDNSNameWithCompression(data []byte, offset int, jumps int) (string, i
 	if offset >= len(data) {
 		return "", 0, fmt.Errorf("offset %d exceeds data length %d", offset, len(data))
 	}
-	
+
 	if jumps > MaxCompressionJumps {
 		return "", 0, fmt.Errorf("too many compression jumps, possible loop detected")
 	}
-	
+
 	var nameParts []string
 	i := offset
 	totalLength := 0
 	savedOffset := -1 // Saved position after first compression pointer
-	
+
 	for {
 		if i >= len(data) {
 			return "", 0, fmt.Errorf("data too short while reading DNS name at offset %d", offset)
 		}
-		
+
 		lengthByte := data[i]
-		
+
 		// Check for compression pointer (first 2 bits are 11)
 		if lengthByte&CompressionMask == CompressionMask {
 			// This is a compression pointer
 			if i+1 >= len(data) {
 				return "", 0, fmt.Errorf("data too short for compression pointer at offset %d", i)
 			}
-			
+
 			// Calculate the offset to jump to (14-bit value)
 			pointerOffset := int(binary.BigEndian.Uint16(data[i:i+2])) & CompressionOffset
-			
+
 			// Save current position if this is the first pointer we encounter
 			if savedOffset == -1 {
 				savedOffset = i + 2
 			}
-			
+
 			// Recursively decode the name at the pointer location
 			pointedName, _, err := decodeDNSNameWithCompression(data, pointerOffset, jumps+1)
 			if err != nil {
 				return "", 0, fmt.Errorf("failed to follow compression pointer: %w", err)
 			}
-			
+
 			// Append the pointed name parts
 			if pointedName != "" {
 				nameParts = append(nameParts, pointedName)
 			}
-			
+
 			// We're done after following a pointer
 			break
 		}
-		
+
 		length := int(lengthByte)
 		if length == 0 {
 			i++
 			break
 		}
-		
+
 		// Validate length doesn't exceed max label length
 		if length > MaxLabelLength {
 			return "", 0, fmt.Errorf("label length %d exceeds maximum %d", length, MaxLabelLength)
 		}
-		
+
 		// Check bounds for label data
 		if i+1+length > len(data) {
 			return "", 0, fmt.Errorf("data too short while reading DNS name label at offset %d", i)
 		}
-		
+
 		nameParts = append(nameParts, string(data[i+1:i+1+length]))
 		totalLength += length + 1 // +1 for length byte
 		i += length + 1
-		
+
 		// Check total domain name length limit
 		if totalLength > MaxDomainLength {
 			return "", 0, fmt.Errorf("domain name too long: %d bytes (max %d)", totalLength, MaxDomainLength)
 		}
 	}
-	
+
 	// Return the saved offset if we encountered a compression pointer
 	// Otherwise return the current position
 	if savedOffset != -1 {
 		i = savedOffset
 	}
-	
+
 	return strings.Join(nameParts, "."), i, nil
 }
 
@@ -200,49 +174,49 @@ type Message struct {
 func (m *Message) MarshalBinary() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	compressionMap := make(CompressionMap)
-	
-	// Marshal header
+
+	// Marshal header. We'll overwrite it later if needed, but this reserves the space.
 	headerData, err := m.Header.MarshalBinary()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal header: %w", err)
 	}
 	buf.Write(headerData)
-	
+
 	// Marshal questions with compression
 	for i, q := range m.Questions {
-		qBuf := new(bytes.Buffer)
-		
-		// Encode name with compression
-		if err := encodeDNSNameWithCompression(q.Name, qBuf, compressionMap, buf.Len()); err != nil {
+		if err := encodeDNSNameWithCompression(q.Name, buf, compressionMap); err != nil {
 			return nil, fmt.Errorf("failed to encode question %d name: %w", i, err)
 		}
-		
-		// Write Type and Class
-		binary.Write(qBuf, binary.BigEndian, q.Type)
-		binary.Write(qBuf, binary.BigEndian, q.Class)
-		
-		buf.Write(qBuf.Bytes())
+		if err := binary.Write(buf, binary.BigEndian, q.Type); err != nil {
+			return nil, fmt.Errorf("failed to write question type: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, q.Class); err != nil {
+			return nil, fmt.Errorf("failed to write question class: %w", err)
+		}
 	}
-	
+
 	// Marshal answers with compression
 	for i, rr := range m.Answers {
-		rrBuf := new(bytes.Buffer)
-		
-		// Encode name with compression
-		if err := encodeDNSNameWithCompression(rr.Name, rrBuf, compressionMap, buf.Len()); err != nil {
+		if err := encodeDNSNameWithCompression(rr.Name, buf, compressionMap); err != nil {
 			return nil, fmt.Errorf("failed to encode answer %d name: %w", i, err)
 		}
-		
-		// Write Type, Class, TTL, RDLength, and RData
-		binary.Write(rrBuf, binary.BigEndian, rr.Type)
-		binary.Write(rrBuf, binary.BigEndian, rr.Class)
-		binary.Write(rrBuf, binary.BigEndian, rr.TTL)
-		binary.Write(rrBuf, binary.BigEndian, uint16(len(rr.RData)))
-		rrBuf.Write(rr.RData)
-		
-		buf.Write(rrBuf.Bytes())
+		if err := binary.Write(buf, binary.BigEndian, rr.Type); err != nil {
+			return nil, fmt.Errorf("failed to write answer type: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, rr.Class); err != nil {
+			return nil, fmt.Errorf("failed to write answer class: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, rr.TTL); err != nil {
+			return nil, fmt.Errorf("failed to write answer TTL: %w", err)
+		}
+		if err := binary.Write(buf, binary.BigEndian, uint16(len(rr.RData))); err != nil {
+			return nil, fmt.Errorf("failed to write answer RDLENGTH: %w", err)
+		}
+		if _, err := buf.Write(rr.RData); err != nil {
+			return nil, fmt.Errorf("failed to write answer RDATA: %w", err)
+		}
 	}
-	
+
 	return buf.Bytes(), nil
 }
 
@@ -251,15 +225,14 @@ func (m *Message) UnmarshalBinary(data []byte) error {
 	if len(data) < DNSHeaderSize {
 		return fmt.Errorf("data too short for DNS message: %d bytes", len(data))
 	}
-	
+
 	// Unmarshal header
 	if err := m.Header.UnmarshalBinary(data[:DNSHeaderSize]); err != nil {
 		return fmt.Errorf("failed to unmarshal header: %w", err)
 	}
-	
-	
+
 	offset := DNSHeaderSize
-	
+
 	// Unmarshal questions
 	m.Questions = make([]Question, m.Header.QDCount)
 	for i := uint16(0); i < m.Header.QDCount; i++ {
@@ -267,14 +240,14 @@ func (m *Message) UnmarshalBinary(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("failed to decode question %d name: %w", i, err)
 		}
-		
+
 		// The bytesRead from decodeDNSName tells us the new position AFTER the name
 		nameEndOffset := bytesRead
-		
+
 		if nameEndOffset+4 > len(data) {
 			return fmt.Errorf("data too short for question %d type/class: need %d bytes, have %d", i, nameEndOffset+4, len(data))
 		}
-		
+
 		m.Questions[i] = Question{
 			Name:  name,
 			Type:  binary.BigEndian.Uint16(data[nameEndOffset : nameEndOffset+2]),
@@ -282,7 +255,7 @@ func (m *Message) UnmarshalBinary(data []byte) error {
 		}
 		offset = nameEndOffset + 4
 	}
-	
+
 	// Unmarshal answers
 	m.Answers = make([]ResourceRecord, m.Header.ANCount)
 	for i := uint16(0); i < m.Header.ANCount; i++ {
@@ -290,11 +263,11 @@ func (m *Message) UnmarshalBinary(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("failed to decode answer %d name: %w", i, err)
 		}
-		
+
 		if nameEndOffset+10 > len(data) {
 			return fmt.Errorf("data too short for answer %d fields", i)
 		}
-		
+
 		rr := ResourceRecord{
 			Name:     name,
 			Type:     binary.BigEndian.Uint16(data[nameEndOffset : nameEndOffset+2]),
@@ -303,18 +276,18 @@ func (m *Message) UnmarshalBinary(data []byte) error {
 			RDLength: binary.BigEndian.Uint16(data[nameEndOffset+8 : nameEndOffset+10]),
 		}
 		offset = nameEndOffset + 10
-		
+
 		if offset+int(rr.RDLength) > len(data) {
 			return fmt.Errorf("data too short for answer %d RData", i)
 		}
-		
+
 		rr.RData = make([]byte, rr.RDLength)
 		copy(rr.RData, data[offset:offset+int(rr.RDLength)])
 		offset += int(rr.RDLength)
-		
+
 		m.Answers[i] = rr
 	}
-	
+
 	return nil
 }
 
@@ -444,7 +417,7 @@ type Question struct {
 
 func (q *Question) MarshalBinary() ([]byte, error) {
 	buf := new(bytes.Buffer)
-	
+
 	// Encode DNS name
 	if err := encodeDNSName(q.Name, buf); err != nil {
 		return nil, fmt.Errorf("failed to encode DNS name: %w", err)
@@ -480,6 +453,29 @@ func (q *Question) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// UnmarshalFrom parses a Question from the full DNS message starting at offset.
+// It returns the new offset after parsing this question.
+func (q *Question) UnmarshalFrom(msg []byte, offset int) (int, error) {
+	if offset >= len(msg) {
+		return 0, fmt.Errorf("offset %d out of range for message of length %d", offset, len(msg))
+	}
+
+	name, nextOffset, err := decodeDNSName(msg, offset)
+	if err != nil {
+		return 0, fmt.Errorf("failed to decode question name: %w", err)
+	}
+
+	if nextOffset+4 > len(msg) {
+		return 0, fmt.Errorf("message too short for question type/class at offset %d", nextOffset)
+	}
+
+	q.Name = name
+	q.Type = binary.BigEndian.Uint16(msg[nextOffset : nextOffset+2])
+	q.Class = binary.BigEndian.Uint16(msg[nextOffset+2 : nextOffset+4])
+
+	return nextOffset + 4, nil
+}
+
 type ResourceRecord struct {
 	Name     string
 	Type     uint16
@@ -491,7 +487,7 @@ type ResourceRecord struct {
 
 func (rr *ResourceRecord) MarshalBinary() ([]byte, error) {
 	buf := new(bytes.Buffer)
-	
+
 	// Encode DNS name
 	if err := encodeDNSName(rr.Name, buf); err != nil {
 		return nil, fmt.Errorf("failed to encode DNS name: %w", err)
@@ -531,25 +527,25 @@ func (rr *ResourceRecord) UnmarshalBinary(data []byte) error {
 	}
 	rr.Name = name
 	i := bytesRead
-	
+
 	// Need at least 10 bytes for Type, Class, TTL, and RDLength
 	if i+10 > len(data) {
 		return fmt.Errorf("data too short to read resource record fields")
 	}
-	
+
 	rr.Type = binary.BigEndian.Uint16(data[i : i+2])
 	rr.Class = binary.BigEndian.Uint16(data[i+2 : i+4])
 	rr.TTL = binary.BigEndian.Uint32(data[i+4 : i+8])
 	rr.RDLength = binary.BigEndian.Uint16(data[i+8 : i+10])
 	i += 10
-	
+
 	// Read RData
 	if i+int(rr.RDLength) > len(data) {
 		return fmt.Errorf("data too short to read RData: need %d bytes, have %d", rr.RDLength, len(data)-i)
 	}
-	
+
 	rr.RData = make([]byte, rr.RDLength)
 	copy(rr.RData, data[i:i+int(rr.RDLength)])
-	
+
 	return nil
 }
