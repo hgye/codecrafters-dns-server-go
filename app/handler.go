@@ -1,12 +1,16 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // mockDNSRecords is a map of domain names to their IP addresses for testing
+// Supports wildcard patterns like "*.codecrafters.io"
 var mockDNSRecords = map[string][]byte{
 	"stackoverflow.com":    {151, 101, 129, 69},
 	"stackoverflow.design": {151, 101, 1, 69},
-	"def.codecrafters.io":  {76, 76, 21, 21},
+	"*.codecrafters.io":    {76, 76, 21, 21},
 	"mail.example.com":     {192, 168, 0, 2},
 }
 
@@ -70,7 +74,7 @@ func (h *DNSHandler) forward(q Question) ([]ResourceRecord, error) {
 	fmt.Printf("Forwarding question: %s (Type=%d, Class=%d)\n", q.Name, q.Type, q.Class)
 
 	// Look up the IP address from mock records
-	ip, found := mockDNSRecords[q.Name]
+	ip, found := lookupMockRecord(q.Name)
 	if !found {
 		ip = defaultMockIP
 		fmt.Printf("Domain %s not found in mock records, using default IP\n", q.Name)
@@ -87,6 +91,25 @@ func (h *DNSHandler) forward(q Question) ([]ResourceRecord, error) {
 		RData: ip,
 	}
 	return []ResourceRecord{answer}, nil
+}
+
+// lookupMockRecord looks up a domain in mockDNSRecords, supporting wildcard patterns
+func lookupMockRecord(name string) ([]byte, bool) {
+	// Try exact match first
+	if ip, found := mockDNSRecords[name]; found {
+		return ip, true
+	}
+
+	// Try wildcard match: *.example.com matches foo.example.com
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) == 2 {
+		wildcard := "*." + parts[1]
+		if ip, found := mockDNSRecords[wildcard]; found {
+			return ip, true
+		}
+	}
+
+	return nil, false
 }
 
 // buildResponseHeader creates the response header based on the request and answers
