@@ -277,21 +277,23 @@ func TestRealWorldDNSQuery(t *testing.T) {
 
 	t.Logf("Test data length: %d bytes", len(data))
 
-	// Test with legacy method
-	response, err := handleDNSRequest(data)
+	// Test with handler
+	handler := NewDNSHandler(data)
+	response, err := handler.Handle()
 	if err != nil {
-		t.Fatalf("handleDNSRequestLegacy() failed: %v", err)
+		t.Fatalf("DNSHandler.Handle() failed: %v", err)
 	}
 
-	t.Logf("Legacy response length: %d bytes", len(response))
+	t.Logf("Response length: %d bytes", len(response))
 
-	// Test with new method
-	response2, err := handleDNSRequest(data)
+	// Test with new handler instance
+	handler2 := NewDNSHandler(data)
+	response2, err := handler2.Handle()
 	if err != nil {
-		t.Fatalf("handleDNSRequest() failed: %v", err)
+		t.Fatalf("DNSHandler.Handle() failed: %v", err)
 	}
 
-	t.Logf("New response length: %d bytes", len(response2))
+	t.Logf("Response2 length: %d bytes", len(response2))
 
 	// Both should produce valid responses
 	if len(response) == 0 {
